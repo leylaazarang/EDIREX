@@ -1,0 +1,227 @@
+---
+title: "Orthotopic Model CUP0006"
+author: "Leyla Azarang and Renee Menezes" 
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+  toc_depth: 3  
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+
+```{r, include=FALSE}
+if (!require('pacman')) install.packages('pacman'); library(pacman)
+```
+
+
+
+```{r, include=FALSE}
+p_load("survival", "survminer", "tidyverse", "JMbayes2")
+```
+
+
+
+```{r}
+source("./scripts/mysplit.R") 
+source("./scripts/functions_data_centre_ortho.R")
+```
+
+## Read in data
+
+First read in information about centres available for this model.
+
+```{r}
+xi <- 2
+alldata <- readxl::read_excel("./data/overview1.xlsx")
+myfile <- alldata$FileName[xi]
+mymodel <- strsplit(myfile, split = " ")[[1]][ 1 ]
+all.sheets <- as.character(alldata[xi, -1])
+names(all.sheets) <- colnames(alldata)[ -1 ] 
+all.sheets <- all.sheets[ !is.na(all.sheets) ]
+list.centers <- names(all.sheets)
+```
+
+
+The data here is for model `r mymodel`. It was analysed by the following centers:
+
+```{r}
+knitr::kable(list.centers, col.names = "Centers")
+```
+
+
+### Analysis per center
+
+Reading the data per center.
+
+```{r}
+n_centers <- length(list.centers)
+
+data_centers <- lapply(1:n_centers, read_sheet, myfile = myfile, 
+                       all.sheets = all.sheets)
+names(data_centers) <- list.centers
+```
+
+```{r}
+names(data_centers[[2]])
+as.Date(as.numeric( names(data_centers[[2]])[9:12]), origin = "1899-12-30")
+```
+
+Extract treatment, start and end dates from Label column. 
+For this batch of analyses the event variable is not consistently recorded across all data files.
+
+The data is currently in the wide format, and for the analyses we need it in the long format (one observation per row, for one individual at a time).
+
+
+
+```{r}
+all_data_long <- lapply(1:n_centers, get_data_long, mydatac = data_centers)
+names(all_data_long) <- list.centers
+```
+
+We now need to leave out measurements before the start of the treatment, and after ending it. 
+
+```{r}
+data_long_treat <- lapply(1:n_centers, get_vol_treat, alldata = all_data_long)
+names(data_long_treat) <- names(all_data_long)
+```
+
+## Exploratory data analysis
+
+The following plots depict the tumor volume growth per each center, for each model separately. 
+
+```{r results = 'hide'}
+vp <- lapply(1:n_centers, function(xc){ 
+p <-  ggplot(data = data_long_treat[[ xc ]], aes(x = days, y = volume, 
+                                             group = `GenealogyID`, color =Treatment)) +
+    geom_line()+
+    geom_point(aes(x = days, y = volume))+
+    facet_wrap( vars( `GenealogyID`)  )+
+    ylab("tumor volume")+
+    theme(legend.position = "top") +
+    ggtitle(paste(names(data_long_treat)[xc]) )
+return(p)
+}
+)
+```
+
+```{r fig.width = 10, fig.height = 10}
+vp
+```
+Now group all curves per treatment.
+
+
+```{r results = 'hide'}
+
+vp <- lapply(1:n_centers, function(xc){ 
+p <-  ggplot(data = data_long_treat[[ xc ]], aes(x = days, y = volume, 
+                                             group = GenealogyID, color = Treatment)) +
+    geom_line()+
+     geom_point(aes(x = days, y = volume))+
+    facet_wrap( vars( `Treatment`)  )+
+    ylab("tumor volume")+
+    theme(legend.position = "top") +
+    ggtitle(paste(names(data_long_treat)[xc]) )
+return(p)
+}
+)
+```
+
+```{r fig.width = 10, fig.height = 6}
+vp
+```
+
+## The  impact of center on tumor growth 
+In this section we investigate the effect of center on tumor growth  in each treatment level. For this, we put all data together into a single data frame.
+
+
+```{r}
+all_data <- NULL
+for(xc in 1:(n_centers)) # we exclude RUG because of not having longitudinal data
+{
+  datac <- data_long_treat[[ xc ]]
+  datac$center <- rep(list.centers[ xc ], nrow(datac))
+  all_data <- rbind(all_data, datac)
+}
+all_data <- all_data[!is.na(all_data$volume), ]
+```
+
+Now fit the mixed-effects model, with fixed effects for center, day and treatment.
+
+
+
+
+
+### The effect of treatment per center
+
+
+```{r}
+cont <- nlmeControl( maxIter = 100000, msMaxIter = 1000, tolerance = 1e-6, niterEM = 10000, msMaxEval = 10000)
+
+all_fits <- lapply(1:(n_centers), function(xc){ 
+      lme_fit <- lme(volume ~   days +  days:Treatment, data = data_long_treat[[xc]], 
+                     random = ~ days | GenealogyID, control = cont)
+      mysumm <- summary(lme_fit)
+      pval= summary(lme_fit)$tTable["days:TreatmentPBS", "p-value"]
+      mfitted <- fitted(lme_fit, level =0)
+      res_fitted <- tibble( GenealogyID = names(mfitted), 
+                           Treatment = data_long_treat[[ xc ]]$Treatment, 
+                            days = data_long_treat[[ xc ]]$days, fit_fix = mfitted)
+      
+      return(list( lme_fit= lme_fit , fit_sum = mysumm , fit_tibble = res_fitted , pv= pval  ) )
+}
+)
+
+list_lme_fit <- lapply(1:(n_centers) , function(xc){return(all_fits[[xc]][[1]])})
+names(list_lme_fit) <- names(data_long_treat)[1:3]
+
+list_lme_summ <- lapply(1:(n_centers) , function(xc){return(all_fits[[xc]][[2]])})
+names(list_lme_summ) <- names(data_long_treat)[1:3]
+
+list_lme_fitted <- lapply(1:(n_centers) , function(xc){return(all_fits[[xc]][[3]])})
+names(list_lme_fitted) <- names(data_long_treat)[1:3]
+
+pvals <- round( sapply(1:(n_centers) , function(xc){return(all_fits[[xc]][[4]])}), 3)
+```
+
+
+
+
+Print each model fit summary.
+
+```{r}
+list_lme_summ
+```
+The following plots depict the tumor volume increase in each  center for both treatment groups.
+
+```{r}
+vp <- lapply(1:(n_centers), function(xc){ 
+    
+p <- ggplot(data = list_lme_fitted[[xc]], aes(x = days, y = fit_fix))+
+  geom_line(aes(color=Treatment))+
+  ylab("tumor volume")+
+    xlim(0,60) +
+  ggtitle(paste(names(data_long_treat)[xc]) )+
+     annotate("text", x = 25, y = 100, label = paste("p-value:", pvals[[xc]]) ) 
+return(p)
+}
+)
+```
+
+```{r}
+vp
+```
+
+## Conclusion
+
+By taking  tumor volume data into consideration, we observe that at both  "VHIO" and "RCSI" tumor volume decreases in treatment group whereas in vehicle group it increases over time. But, at RCSI this difference is not significant, it might be because there are a few mice for those tumor volumes were observed for  few time points.
+  
+
+Not to mention that for orthotopic  models we do not have information about the event (cause of death, etc), hence we were not able to do the joint model analyses using both survival and tumor volume data.

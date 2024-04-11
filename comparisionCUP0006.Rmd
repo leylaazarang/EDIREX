@@ -1,0 +1,103 @@
+---
+title: " Comparision CUP Model 0006 and orthotopic 0006"
+author: "Leyla Azarang and Renee Menezes" 
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+  toc_depth: 3  
+---
+
+
+
+
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+```
+
+
+
+
+```{r, include=FALSE}
+if (!require('pacman')) install.packages('pacman'); library(pacman)
+```
+
+
+
+```{r, include=FALSE}
+p_load("survival", "survminer", "tidyverse", "JMbayes2")
+```
+
+
+
+```{r}
+source("./scripts/mysplit.R") 
+source("./scripts/functions_data_centre_ortho.R")
+```
+
+## Load data
+
+
+```{r}
+load("save/all_data_s_0006")
+all_data_s <- all_data %>%
+    mutate(type = "standard")
+load("save/all_data_o_0006")
+all_data_o <- all_data %>%
+    mutate(type = "orthotopic")
+```
+
+
+
+```{r}
+all_data_s_o <- bind_rows (all_data_s, all_data_o) %>%
+    mutate(type = factor(type)) %>%
+    mutate(Treatment = factor(ifelse(Treatment == "PBS" | Treatment == "Physio" , "PBS", "Cetuximab"), levels = c("PBS","Cetuximab")))
+
+```
+
+# The effect of treatment on tumor growth per study
+
+Regardless of the center we want to see if there is a difference between the effect of treatment on tumor volume between standard and orthotopic experiments. 
+
+
+```{r}
+cont <- nlmeControl( maxIter = 100000, msMaxIter = 1000, tolerance = 1e-6, niterEM = 10000, msMaxEval = 10000)
+
+lme_fit <- lme(volume ~   days  + type +  days:Treatment  + days:type + days:type: Treatment, data = all_data_s_o, random = ~ days | GenealogyID, control = cont)
+
+summary(lme_fit)
+```
+
+```{r}
+fitted <- fitted(lme_fit, level = 0)
+
+
+
+fitted <- tibble( MouseID = names(fitted),   type = all_data_s_o$type, 
+                 Treatment = all_data_s_o$Treatment, days = all_data_s_o$days, fit_fix = fitted)
+```
+
+
+
+The following plot depicts the tumor volume increase in different studies for both  treatment groups. 
+
+```{r}
+ggplot(fitted, aes(x = days, y = fit_fix, color = type))+
+  geom_line(aes(linetype=Treatment))+
+  ylab("tumor volume")+
+     annotate("text", x = 25, y = 500, label = paste("p-value:", 0.0000))
+```
+
+# Conclusion
+
+- Tumor growth in standard study is significantly faster than orthotopic study.
+- Unlike in standard study, in the orthotopic study the effect of treatment is not significant.  
+- In standard study the treatment effect is significantly bigger than orthotopic study.
+

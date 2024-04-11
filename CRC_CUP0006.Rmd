@@ -1,0 +1,396 @@
+---
+title: "CRC Model CUP0006"
+author: "Leyla Azarang and Renee Menezes" 
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+  toc_depth: 3  
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+
+
+```{r, include=FALSE}
+if (!require('pacman')) install.packages('pacman'); library(pacman)
+```
+
+
+
+```{r, include=FALSE}
+p_load("survival", "survminer", "tidyverse", "JMbayes2")
+```
+
+
+
+```{r}
+source("./scripts/mysplit.R") 
+source("./scripts/functions_data_centre.R")
+```
+
+## Read in data
+
+First read in information about centers available for this model.
+
+```{r}
+xi <- 7
+alldata <- readxl::read_excel("./data/overview1.xlsx")
+myfile <- alldata$FileName[xi]
+mymodel <- strsplit(myfile, split = " ")[[1]][ 1 ]
+all.sheets <- as.character(alldata[xi, -1])
+names(all.sheets) <- colnames(alldata)[ -1 ] 
+all.sheets <- all.sheets[ !is.na(all.sheets) ]
+list.centers <- names(all.sheets)
+```
+
+The data here is for model `r mymodel`. It was analysed by the following centers:
+
+```{r}
+knitr::kable(list.centers, col.names = "Centers")
+```
+
+
+
+### Analysis per center
+
+Reading the data per center.
+
+```{r}
+n_centers <- length(list.centers)
+
+data_centers <- lapply(1:n_centers, read_sheet, myfile = myfile, 
+                       all.sheets = all.sheets)
+names(data_centers) <- list.centers
+``` 
+
+Extract treatment, start and end dates from Label column. 
+For this batch of analyses the event variable is not consistently recorded across all data files.
+
+The data is currently in the wide format, and for the analyses we need it in the long format (one observation per row, for one individual at a time).
+
+
+
+```{r}
+all_data_long <- lapply(1:n_centers, get_data_long, mydatac = data_centers)
+names(all_data_long) <- list.centers
+```
+
+We now need to leave out measurements before the start of the treatment, and after ending it. 
+
+```{r}
+data_long_treat <- lapply(1:n_centers, get_vol_treat, alldata = all_data_long)
+names(data_long_treat) <- names(all_data_long)
+```
+
+
+
+## Exploratory data analysis
+
+The following plots depict the tumor volume growth per each center, for each model separately. 
+
+```{r results = 'hide'}
+vp <- lapply(1:n_centers, function(xc){ 
+p <-  ggplot(data = data_long_treat[[ xc ]], aes(x = days, y = volume, 
+                                             group = `GenealogyID`, color =Treatment)) +
+    geom_line()+
+    facet_wrap( vars( `GenealogyID`)  )+
+    ylab("tumor volume")+
+    theme(legend.position = "top") +
+    ggtitle(paste(names(data_long_treat)[xc]) )
+return(p)
+}
+)
+```
+
+```{r fig.width = 10, fig.height = 10}
+vp
+```
+
+
+Now group all curves per treatment.
+
+
+```{r results = 'hide'}
+
+vp <- lapply(1:n_centers, function(xc){ 
+p <-  ggplot(data = data_long_treat[[ xc ]], aes(x = days, y = volume, 
+                                             group = GenealogyID, color = Treatment)) +
+    geom_line()+
+    facet_wrap( vars( `Treatment`)  )+
+    ylab("tumor volume")+
+    theme(legend.position = "top") +
+    ggtitle(paste(names(data_long_treat)[xc]) )
+return(p)
+}
+)
+```
+
+```{r fig.width = 10, fig.height = 6}
+vp
+```
+
+
+## The  impact of center on tumor growth 
+
+In this section we investigate the effect of center on tumor growth  in each treatment level. For this, we put all data together into a single data frame.
+
+
+```{r}
+all_data <- NULL
+for(xc in 1:n_centers)
+{
+  datac <- data_long_treat[[ xc ]]
+  datac$center <- rep(list.centers[ xc ], nrow(datac))
+  all_data <- rbind(all_data, datac)
+}
+all_data <- all_data[!is.na(all_data$volume), ]
+```
+
+Now fit the mixed-effects model, with fixed effects for center, day and treatment.
+
+```{r}
+library(nlme)
+
+lme_fit <- lme(volume ~  center + days  + days:center  + days:Treatment , 
+               data = all_data, random = ~ days | GenealogyID)
+
+summary(lme_fit)
+
+fitted <- fitted(lme_fit, level = 0)
+
+
+all.equal(names(fitted), all_data$GenealogyID)
+
+fitted <- tibble( MouseID = names(fitted),   center = all_data$center, 
+                 Treatment = all_data$Treatment, days = all_data$days, fit_fix = fitted)
+
+```
+
+The following plot depicts the tumor volume increase in different centers for both  treatment groups. 
+
+```{r}
+ggplot(fitted, aes(x = days, y = fit_fix, color = center))+
+  geom_line(aes(linetype=Treatment))+
+  ylab("tumor volume")
+
+```
+
+
+
+## The effect of treatment per center
+
+
+```{r}
+cont <- nlmeControl( maxIter = 100000, msMaxIter = 1000, tolerance = 1e-6, niterEM = 10000, msMaxEval = 10000)
+
+all_fits <- lapply(1:n_centers, function(xc){ 
+      lme_fit <- lme(volume ~   days +  days:Treatment, data = data_long_treat[[xc]], 
+                     random = ~ days | GenealogyID, control = cont)
+      mysumm <- summary(lme_fit)
+      mfitted <- fitted(lme_fit, level =0)
+      res_fitted <- tibble( GenealogyID = names(mfitted), 
+                           Treatment = data_long_treat[[ xc ]]$Treatment, 
+                            days = data_long_treat[[ xc ]]$days, fit_fix = mfitted)
+      
+      return(list( lme_fit= lme_fit , fit_sum = mysumm , fit_tibble = res_fitted  ) )
+}
+)
+
+list_lme_fit <- lapply(1:n_centers , function(xc){return(all_fits[[xc]][[1]])})
+names(list_lme_fit) <- names(data_long_treat)
+
+list_lme_summ <- lapply(1:n_centers , function(xc){return(all_fits[[xc]][[2]])})
+names(list_lme_summ) <- names(data_long_treat)
+
+list_lme_fitted <- lapply(1:n_centers , function(xc){return(all_fits[[xc]][[3]])})
+names(list_lme_fitted) <- names(data_long_treat)
+```
+
+
+
+
+
+```{r include = FALSE, results = 'hide'}
+#Print each model fit summary.
+list_lme_summ
+```
+
+The following plots depict the tumor volume increase in each  center for both  "PBS" and "TDM" treatments.
+
+```{r}
+vp <- lapply(1:n_centers, function(xc){ 
+    
+p <- ggplot(data = list_lme_fitted[[xc]], aes(x = days, y = fit_fix))+
+  geom_line(aes(color=Treatment))+
+  ylab("tumor volume")+
+  ggtitle(paste(names(data_long_treat)[xc]) )
+return(p)
+}
+)
+```
+
+```{r}
+vp
+```
+
+
+## Survival analysis
+
+Below we make a list of survival data corresponding to different center. 
+
+```{r}
+surv_data_centers <- lapply(1:n_centers , get_surv_data , mydatac = data_centers)
+names(surv_data_centers) <- names(data_centers)
+```
+
+
+```{r}
+tab_event_centers <- lapply(1:n_centers, function(xc){
+  tab_event = table(surv_data_centers[[xc]]$`event/status/sensor`)
+  
+ return(tab_event)
+}
+) 
+  
+names(tab_event_centers) <- names(data_centers)
+```
+
+
+```{r}
+tab_event_centers
+```
+
+
+
+```{r}
+surv_object_centers <- lapply(1:n_centers , get_surv_object ,surv_data_centers)
+names(surv_object_centers) <- names(data_centers)
+```
+
+
+```{r}
+surv_fit_centers <- lapply(1:n_centers , get_surv_fit, surv_object_centers , surv_data_centers)
+names(surv_fit_centers) <- names(data_centers)
+```
+
+
+From the following tables, for each center, we can see the number of events in each treatment group. 
+
+```{r}
+surv_fit_centers
+```
+
+
+### The effect of treatment on survival time 
+
+The following plots depict the survival curves in each center. 
+
+
+```{r}
+lapply( 1:n_centers, function(xc){
+  plot(surv_fit_centers[[xc]], 
+     ylab = "Survival Proportion", 
+     xlab = "Time",
+     col = c(1,2),
+     main = paste("KM curve",names(data_centers)[xc])) 
+    }
+)
+```
+
+
+
+```{r}
+cox_centers <- lapply(1:n_centers, function(xc){ 
+    cox <- coxph(surv_object_centers[[xc]] ~ 1 , data = surv_data_centers[[xc]])
+    return(cox)
+}
+)
+names(cox_centers)<- names(data_centers)
+```
+
+
+## Joint modelling
+
+In this section, we use both survival and tumor growth altogether  to analyse the data. In this part, for each center,  we investigate the effect of the treatment on tumor growth  by using the the association of tumor growth with survival time. 
+
+
+
+
+```{r }
+jointFit_centers <- lapply(1:n_centers, function(xc){ 
+    jointFit <- jm(cox_centers[[xc]], list_lme_fit[[xc]], time_var = "days", data_Surv = surv_data_centers[[xc]] ,  n_iter = 85000L, n_burnin = 3500L)
+    sum <- summary(jointFit)
+    return(sum)
+}
+)
+```
+
+```{r}
+pvals <- round(sapply(1:n_centers, function(xc)jointFit_centers[[xc]]$Outcome1[["days:TreatmentPhysio", "P"]]), 3)
+names(jointFit_centers) <- names(data_centers)
+jointFit_centers
+```
+
+
+
+
+```{r}
+# plot joint models
+Name_Treat <- levels(factor(unique(data_long_treat[[5]]$Treatment)))
+list_data_JMfit <- lapply(1:n_centers , function(xc){
+  fit <- jointFit_centers[[xc]]$Outcome1
+ a <- fit[1,"Mean"]
+ b_Cont <- fit["days","Mean"]
+ b_Treat <- b_Cont + fit[3,"Mean"] 
+
+ days <- 0:max(0:max(data_long_treat[[xc]]$days))
+ pred_Cont <- a + b_Cont *days
+ pred_Treat <- a + b_Treat *days
+ Group <- rep(names(data_long_treat)[xc], length(days))
+ data_JMfit <- tibble(day = days, pred_Cont= pred_Cont,       pred_Treat= pred_Treat, Group= Group)
+ 
+ data_JMfit <- data_JMfit %>%
+  gather(key= "Treatment", value="Pred", -day,  -Group ) %>%
+  mutate(Pred = as.numeric(Pred))%>%
+  mutate(Treatment =factor( ifelse(Treatment =="pred_Cont", Name_Treat[1], Name_Treat[2])))
+ return(data_JMfit)
+}
+)
+
+names(list_data_JMfit) <- names(data_centers)
+```
+
+
+```{r}
+JMp <- lapply(1:n_centers, function(xc){ 
+    
+p <- ggplot(data =list_data_JMfit[[xc]], aes(x = day, y = Pred, color = Treatment))+
+   geom_line()+
+   geom_hline( yintercept = 1500, color="#331112", linetype="longdash")+
+   ylab("tumor volume")+
+   scale_x_continuous( breaks=seq(0,45,5)) +
+  scale_y_continuous(lim=c(0,2000),breaks=seq(0,2000,500))+
+ ggtitle(paste(names(list_data_JMfit)[xc]) )+
+     annotate("text", x = 5, y = 100, label = paste("p-value:", pvals[[xc]]) )
+return(p)
+}
+)
+```
+
+
+
+```{r}
+JMp
+```
+
+
+## Conclusion
+
+By taking  both survival information and tumor volume data into consideration, we observe that in all centers there is a significant effect of treatment on tumor volume growth. Treatment significantly controls tumor growth. 
